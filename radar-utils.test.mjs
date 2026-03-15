@@ -43,3 +43,20 @@ test('worldToMinimapPoint clamps units outside the arena to the radar edge', asy
 
     assert.deepEqual(point, { x: 162, y: 18 });
 });
+
+test('projectWorldToRadarPoint rotates world positions so the player forward direction stays up', async () => {
+    const { projectWorldToRadarPoint } = await loadRadarUtils();
+
+    const point = projectWorldToRadarPoint(
+        { x: -50, z: 0 },
+        { x: 0, z: 0 },
+        {
+            size: 180,
+            padding: 18,
+            range: 120,
+            yaw: Math.PI / 2
+        }
+    );
+
+    assert.deepEqual(point, { x: 90, y: 60, clamped: false });
+});

@@ -110,6 +110,12 @@
             box-shadow: 0 0 14px rgba(136, 255, 173, 0.75);
         }
 
+        .hud-hidden {
+            opacity: 0 !important;
+            visibility: hidden !important;
+            pointer-events: none !important;
+        }
+
         .panel {
             position: fixed;
             z-index: 1100;
@@ -527,6 +533,10 @@
             <span class="panel-key">控制</span>
             <span id="pointerInfo" class="panel-value">左键进入战斗</span>
         </div>
+        <div class="panel-row">
+            <span class="panel-key">音效</span>
+            <span id="audioInfo" class="panel-value">等待激活</span>
+        </div>
     </div>
     
     <div id="minimapPanel" class="panel">
@@ -578,7 +588,7 @@
         <button id="startBtn">开始游戏</button>
         
         <div class="controls-info">
-            <p><strong>操作说明：</strong> WASD-移动 | 鼠标-瞄准 | 左键-射击 | 空格-跳跃 | R-换弹</p>
+            <p><strong>操作说明：</strong> WASD-移动 | 鼠标-瞄准 | 左键-射击 | 空格-跳跃 | R-换弹 | Q-HUD</p>
         </div>
     </div>
     
@@ -588,6 +598,8 @@
         <button id="restartBtn">重新开始</button>
     </div>
 
+    <script src="hud-utils.js"></script>
+    <script src="audio-utils.js"></script>
     <script src="radar-utils.js"></script>
     <script>
         console.log('=== 脚本开始执行 ===');
@@ -632,13 +644,29 @@
         var reloadDuration = 2000;
         var muzzleFlash = null;
         var muzzleFlashTime = 0;
+        var audioContext = null;
+        var audioMasterGain = null;
+        var audioNoiseBuffer = null;
+        var lastFootstepTime = 0;
+        var footstepIndex = 0;
+        var lastPlayerDamageSoundTime = 0;
+        var lastHitConfirmTime = 0;
+        var isHudVisible = true;
+        var hudTargetIds = ['crosshair', 'hud', 'gameInfo', 'minimapPanel'];
         var minimapCanvas = null;
         var minimapContext = null;
         var radarConfig = {
             size: 180,
             padding: 18,
+            range: 220,
             worldMin: -170,
-            worldMax: 170
+            worldMax: 170,
+            anchors: [
+                { label: 'T', x: -150, z: -180 },
+                { label: 'A', x: -100, z: -50 },
+                { label: 'B', x: 120, z: 100 },
+                { label: 'CT', x: 0, z: 180 }
+            ]
         };
 
         // DOM加载完成后立即设置菜单按钮
@@ -654,7 +682,31 @@
                 minimapContext = minimapCanvas.getContext('2d');
                 updateMinimap();
             }
+            setHudVisibility(true);
             updatePointerStatusText();
+            updateAudioStatusText();
+        }
+
+        function setHudVisibility(isVisible) {
+            isHudVisible = isVisible;
+
+            for (var i = 0; i < hudTargetIds.length; i++) {
+                var element = document.getElementById(hudTargetIds[i]);
+                if (!element) continue;
+
+                if (isVisible) {
+                    element.classList.remove('hud-hidden');
+                } else {
+                    element.classList.add('hud-hidden');
+                }
+            }
+        }
+
+        function toggleHudVisibility() {
+            var nextState = window.CrossfireHud
+                ? window.CrossfireHud.toggleHudVisibilityState(isHudVisible)
+                : !isHudVisible;
+            setHudVisibility(nextState);
         }
 
         function getAliveCounts() {
@@ -681,37 +733,452 @@
             pointerInfo.textContent = isPointerLocked ? '鼠标已锁定，保持压制' : '左键锁定鼠标进入战斗';
         }
 
+        function updateAudioStatusText() {
+            var audioInfo = document.getElementById('audioInfo');
+            if (!audioInfo) return;
+
+            if (!window.AudioContext && !window.webkitAudioContext) {
+                audioInfo.textContent = '浏览器不支持';
+                return;
+            }
+
+            if (!audioContext) {
+                audioInfo.textContent = '点击开始激活';
+                return;
+            }
+
+            audioInfo.textContent = audioContext.state === 'running' ? '战场音效在线' : '等待恢复';
+        }
+
+        function ensureAudioContext() {
+            var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
+            if (!AudioContextCtor) return null;
+
+            if (!audioContext) {
+                audioContext = new AudioContextCtor();
+
+                var compressor = audioContext.createDynamicsCompressor();
+                compressor.threshold.value = -18;
+                compressor.knee.value = 22;
+                compressor.ratio.value = 5;
+                compressor.attack.value = 0.003;
+                compressor.release.value = 0.18;
+
+                audioMasterGain = audioContext.createGain();
+                audioMasterGain.gain.value = 0.24;
+                audioMasterGain.connect(compressor);
+                compressor.connect(audioContext.destination);
+            }
+
+            updateAudioStatusText();
+            return audioContext;
+        }
+
+        function resumeAudioContext() {
+            var ctx = ensureAudioContext();
+            if (!ctx) return;
+
+            if (ctx.state === 'suspended') {
+                ctx.resume().then(function() {
+                    updateAudioStatusText();
+                }).catch(function(error) {
+                    console.warn('音频上下文恢复失败:', error);
+                });
+            } else {
+                updateAudioStatusText();
+            }
+        }
+
+        function getNoiseBuffer() {
+            if (!audioContext) return null;
+            if (audioNoiseBuffer) return audioNoiseBuffer;
+
+            var buffer = audioContext.createBuffer(1, audioContext.sampleRate, audioContext.sampleRate);
+            var channelData = buffer.getChannelData(0);
+
+            for (var i = 0; i < channelData.length; i++) {
+                channelData[i] = (Math.random() * 2 - 1) * (1 - i / channelData.length * 0.18);
+            }
+
+            audioNoiseBuffer = buffer;
+            return audioNoiseBuffer;
+        }
+
+        function clampPan(value) {
+            return Math.max(-0.95, Math.min(0.95, value || 0));
+        }
+
+        function connectToAudioBus(inputNode, pan) {
+            if (!audioMasterGain) return;
+
+            if (audioContext.createStereoPanner) {
+                var panner = audioContext.createStereoPanner();
+                panner.pan.value = clampPan(pan);
+                inputNode.connect(panner);
+                panner.connect(audioMasterGain);
+            } else {
+                inputNode.connect(audioMasterGain);
+            }
+        }
+
+        function scheduleEnvelope(gainNode, at, peak, attack, decay) {
+            var safePeak = Math.max(peak, 0.0001);
+            gainNode.gain.cancelScheduledValues(at);
+            gainNode.gain.setValueAtTime(0.0001, at);
+            gainNode.gain.linearRampToValueAtTime(safePeak, at + attack);
+            gainNode.gain.exponentialRampToValueAtTime(0.0001, at + attack + decay);
+        }
+
+        function playOscillatorBurst(options) {
+            if (!audioContext || !audioMasterGain) return;
+
+            var osc = audioContext.createOscillator();
+            var gainNode = audioContext.createGain();
+            var at = options.at || audioContext.currentTime;
+            var attack = options.attack || 0.002;
+            var decay = options.decay || 0.14;
+            var endFrequency = options.endFrequency || Math.max(30, (options.startFrequency || 160) * 0.45);
+
+            osc.type = options.type || 'triangle';
+            osc.frequency.setValueAtTime(options.startFrequency || 160, at);
+            osc.frequency.exponentialRampToValueAtTime(Math.max(endFrequency, 20), at + attack + decay);
+            scheduleEnvelope(gainNode, at, options.volume || 0.08, attack, decay);
+            osc.connect(gainNode);
+            connectToAudioBus(gainNode, options.pan || 0);
+            osc.start(at);
+            osc.stop(at + attack + decay + 0.05);
+        }
+
+        function playNoiseBurst(options) {
+            if (!audioContext || !audioMasterGain) return;
+
+            var buffer = getNoiseBuffer();
+            if (!buffer) return;
+
+            var source = audioContext.createBufferSource();
+            var filter = audioContext.createBiquadFilter();
+            var gainNode = audioContext.createGain();
+            var at = options.at || audioContext.currentTime;
+            var attack = options.attack || 0.002;
+            var decay = options.decay || 0.08;
+
+            source.buffer = buffer;
+            filter.type = options.filterType || 'bandpass';
+            filter.frequency.setValueAtTime(options.filterFrequency || 900, at);
+            filter.Q.value = options.filterQ || 0.8;
+
+            scheduleEnvelope(gainNode, at, options.volume || 0.03, attack, decay);
+            source.connect(filter);
+            filter.connect(gainNode);
+            connectToAudioBus(gainNode, options.pan || 0);
+            source.start(at);
+            source.stop(at + attack + decay + 0.04);
+        }
+
+        function getRelativePan(sourcePosition) {
+            if (!player || !sourcePosition) return 0;
+            return clampPan((sourcePosition.x - player.position.x) / 70);
+        }
+
+        function getDistanceVolume(sourcePosition, maxDistance, minVolume, maxVolume) {
+            if (!player || !sourcePosition) return maxVolume;
+
+            var distance = player.position.distanceTo(sourcePosition);
+            var ratio = Math.max(0, 1 - Math.min(distance / maxDistance, 1));
+            return minVolume + (maxVolume - minVolume) * ratio;
+        }
+
+        function playFootstepSound() {
+            resumeAudioContext();
+            if (!audioContext || !audioMasterGain) return;
+
+            var now = audioContext.currentTime;
+            var pan = footstepIndex % 2 === 0 ? -0.12 : 0.12;
+            var baseFrequency = footstepIndex % 2 === 0 ? 86 : 96;
+
+            playOscillatorBurst({
+                type: 'triangle',
+                at: now,
+                startFrequency: baseFrequency,
+                endFrequency: 42,
+                volume: 0.09,
+                attack: 0.001,
+                decay: 0.05,
+                pan: pan
+            });
+
+            playNoiseBurst({
+                at: now,
+                filterType: 'bandpass',
+                filterFrequency: footstepIndex % 2 === 0 ? 620 : 760,
+                filterQ: 0.7,
+                volume: 0.028,
+                attack: 0.001,
+                decay: 0.06,
+                pan: pan
+            });
+
+            footstepIndex++;
+        }
+
+        function playReloadSound(weaponName) {
+            resumeAudioContext();
+            if (!audioContext || !audioMasterGain || !window.CrossfireAudio) return;
+
+            var profile = window.CrossfireAudio.getWeaponAudioProfile(weaponName);
+            var now = audioContext.currentTime;
+            var durationSeconds = reloadDuration / 1000;
+
+            for (var i = 0; i < profile.reloadPattern.length; i++) {
+                var at = now + profile.reloadPattern[i] * durationSeconds;
+                playOscillatorBurst({
+                    type: i % 2 === 0 ? 'square' : 'triangle',
+                    at: at,
+                    startFrequency: 980 - i * 120,
+                    endFrequency: 360,
+                    volume: 0.035,
+                    attack: 0.001,
+                    decay: 0.045,
+                    pan: 0.16
+                });
+
+                playNoiseBurst({
+                    at: at,
+                    filterType: 'bandpass',
+                    filterFrequency: 1600 - i * 150,
+                    filterQ: 3.2,
+                    volume: 0.018,
+                    attack: 0.001,
+                    decay: 0.03,
+                    pan: 0.16
+                });
+            }
+
+            playOscillatorBurst({
+                type: 'triangle',
+                at: now + durationSeconds * 0.92,
+                startFrequency: 320,
+                endFrequency: 180,
+                volume: 0.04,
+                attack: 0.001,
+                decay: 0.06,
+                pan: 0.12
+            });
+        }
+
+        function playWeaponShotSound(weaponName, options) {
+            resumeAudioContext();
+            if (!audioContext || !audioMasterGain || !window.CrossfireAudio) return;
+
+            var profile = window.CrossfireAudio.getWeaponAudioProfile(weaponName);
+            var shot = profile.shot;
+            var now = audioContext.currentTime;
+            var volumeScale = options && options.volumeScale ? options.volumeScale : 1;
+            var pan = options && options.pan ? options.pan : 0;
+
+            playOscillatorBurst({
+                type: shot.wave,
+                at: now,
+                startFrequency: shot.startFrequency,
+                endFrequency: shot.endFrequency,
+                volume: 0.16 * volumeScale,
+                attack: 0.001,
+                decay: shot.decay,
+                pan: pan
+            });
+
+            playNoiseBurst({
+                at: now,
+                filterType: 'highpass',
+                filterFrequency: weaponName === 'shotgun' ? 540 : 880,
+                filterQ: 0.9,
+                volume: shot.noiseAmount * 0.16 * volumeScale,
+                attack: 0.001,
+                decay: shot.decay * 0.82,
+                pan: pan
+            });
+
+            if (weaponName === 'shotgun' || weaponName === 'sniper') {
+                playOscillatorBurst({
+                    type: 'sine',
+                    at: now + 0.02,
+                    startFrequency: weaponName === 'shotgun' ? 72 : 58,
+                    endFrequency: 30,
+                    volume: 0.08 * volumeScale,
+                    attack: 0.001,
+                    decay: weaponName === 'shotgun' ? 0.18 : 0.26,
+                    pan: pan
+                });
+            }
+        }
+
+        function playHitConfirmSound(isKill) {
+            resumeAudioContext();
+            if (!audioContext || !audioMasterGain) return;
+
+            var nowMs = Date.now();
+            if (!isKill && nowMs - lastHitConfirmTime < 70) return;
+            lastHitConfirmTime = nowMs;
+
+            var now = audioContext.currentTime;
+            playOscillatorBurst({
+                type: 'sine',
+                at: now,
+                startFrequency: isKill ? 960 : 720,
+                endFrequency: isKill ? 560 : 480,
+                volume: isKill ? 0.075 : 0.05,
+                attack: 0.001,
+                decay: isKill ? 0.09 : 0.06
+            });
+
+            if (isKill) {
+                playOscillatorBurst({
+                    type: 'triangle',
+                    at: now + 0.05,
+                    startFrequency: 540,
+                    endFrequency: 320,
+                    volume: 0.05,
+                    attack: 0.001,
+                    decay: 0.08
+                });
+            }
+        }
+
+        function triggerPlayerDamageSound(intensity) {
+            resumeAudioContext();
+            if (!audioContext || !audioMasterGain) return;
+
+            var nowMs = Date.now();
+            if (nowMs - lastPlayerDamageSoundTime < 140) return;
+            lastPlayerDamageSoundTime = nowMs;
+
+            var now = audioContext.currentTime;
+            var heavy = intensity >= 25;
+
+            playOscillatorBurst({
+                type: heavy ? 'sawtooth' : 'triangle',
+                at: now,
+                startFrequency: heavy ? 140 : 118,
+                endFrequency: 54,
+                volume: heavy ? 0.12 : 0.09,
+                attack: 0.001,
+                decay: heavy ? 0.16 : 0.12
+            });
+
+            playNoiseBurst({
+                at: now,
+                filterType: 'lowpass',
+                filterFrequency: heavy ? 420 : 520,
+                filterQ: 0.8,
+                volume: heavy ? 0.05 : 0.035,
+                attack: 0.001,
+                decay: 0.08
+            });
+        }
+
+        function playEmptyTriggerSound() {
+            resumeAudioContext();
+            if (!audioContext || !audioMasterGain) return;
+
+            var now = audioContext.currentTime;
+            playOscillatorBurst({
+                type: 'square',
+                at: now,
+                startFrequency: 420,
+                endFrequency: 260,
+                volume: 0.03,
+                attack: 0.001,
+                decay: 0.035,
+                pan: 0.12
+            });
+        }
+
         function drawMinimapGrid(ctx, size) {
+            var center = size / 2;
+            var radius = center - radarConfig.padding;
             var gradient = ctx.createLinearGradient(0, 0, size, size);
             gradient.addColorStop(0, 'rgba(14, 32, 42, 0.95)');
             gradient.addColorStop(1, 'rgba(40, 62, 66, 0.85)');
             ctx.fillStyle = gradient;
             ctx.fillRect(0, 0, size, size);
 
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(center, center, radius, 0, Math.PI * 2);
+            ctx.clip();
+
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.08)';
             ctx.lineWidth = 1;
 
-            for (var i = 0; i <= 4; i++) {
-                var offset = radarConfig.padding + i * ((size - radarConfig.padding * 2) / 4);
+            for (var i = 1; i <= 3; i++) {
                 ctx.beginPath();
-                ctx.moveTo(radarConfig.padding, offset);
-                ctx.lineTo(size - radarConfig.padding, offset);
-                ctx.stroke();
-
-                ctx.beginPath();
-                ctx.moveTo(offset, radarConfig.padding);
-                ctx.lineTo(offset, size - radarConfig.padding);
+                ctx.arc(center, center, radius * (i / 3), 0, Math.PI * 2);
                 ctx.stroke();
             }
 
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
-            ctx.strokeRect(radarConfig.padding, radarConfig.padding, size - radarConfig.padding * 2, size - radarConfig.padding * 2);
+            for (var j = 0; j < 4; j++) {
+                var angle = (Math.PI / 2) * j;
+                ctx.beginPath();
+                ctx.moveTo(center, center);
+                ctx.lineTo(center + Math.cos(angle) * radius, center + Math.sin(angle) * radius);
+                ctx.stroke();
+            }
 
-            ctx.fillStyle = 'rgba(241, 233, 213, 0.36)';
-            ctx.font = '700 13px Rajdhani, Noto Sans SC, sans-serif';
-            ctx.fillText('A', 26, 38);
-            ctx.fillText('MID', size / 2 - 12, size / 2 + 4);
-            ctx.fillText('B', size - 34, size - 24);
+            ctx.restore();
+
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.16)';
+            ctx.lineWidth = 1.2;
+            ctx.beginPath();
+            ctx.arc(center, center, radius, 0, Math.PI * 2);
+            ctx.stroke();
+
+            ctx.fillStyle = 'rgba(241, 233, 213, 0.5)';
+            ctx.font = '700 11px Rajdhani, Noto Sans SC, sans-serif';
+            ctx.fillText('FWD', center - 12, radarConfig.padding - 4);
+            ctx.fillText(String(radarConfig.range) + 'm', center - 12, size - 6);
+        }
+
+        function getRadarPointForPosition(position) {
+            if (!window.CrossfireRadar) return null;
+
+            if (player) {
+                return window.CrossfireRadar.projectWorldToRadarPoint(
+                    { x: position.x, z: position.z },
+                    { x: player.position.x, z: player.position.z },
+                    {
+                        size: radarConfig.size,
+                        padding: radarConfig.padding,
+                        range: radarConfig.range,
+                        yaw: player.yaw || 0
+                    }
+                );
+            }
+
+            return window.CrossfireRadar.worldToMinimapPoint({
+                x: position.x,
+                z: position.z
+            }, radarConfig);
+        }
+
+        function drawMinimapAnchors(ctx) {
+            if (!player || !window.CrossfireRadar) return;
+
+            ctx.fillStyle = 'rgba(223, 232, 214, 0.52)';
+            ctx.font = '700 10px Rajdhani, Noto Sans SC, sans-serif';
+
+            for (var i = 0; i < radarConfig.anchors.length; i++) {
+                var anchor = radarConfig.anchors[i];
+                var point = getRadarPointForPosition(anchor);
+                if (!point) continue;
+
+                ctx.beginPath();
+                ctx.fillStyle = 'rgba(255, 226, 171, 0.16)';
+                ctx.arc(point.x, point.y, 5, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.fillStyle = 'rgba(223, 232, 214, 0.6)';
+                ctx.fillText(anchor.label, point.x + 6, point.y - 6);
+            }
         }
 
         function drawMinimapMarker(ctx, point, color, radius, glowRadius) {
@@ -735,39 +1202,41 @@
             var size = minimapCanvas.width;
             ctx.clearRect(0, 0, size, size);
             drawMinimapGrid(ctx, size);
+            drawMinimapAnchors(ctx);
 
             for (var i = 0; i < teammates.length; i++) {
                 if (!teammates[i].isAlive) continue;
-                var teammatePoint = window.CrossfireRadar.worldToMinimapPoint({
-                    x: teammates[i].position.x,
-                    z: teammates[i].position.z
-                }, radarConfig);
+                var teammatePoint = getRadarPointForPosition(teammates[i].position);
                 drawMinimapMarker(ctx, teammatePoint, '#59c6ff', 4, 8);
             }
 
             for (var j = 0; j < enemies.length; j++) {
                 if (!enemies[j].isAlive) continue;
-                var enemyPoint = window.CrossfireRadar.worldToMinimapPoint({
-                    x: enemies[j].position.x,
-                    z: enemies[j].position.z
-                }, radarConfig);
+                var enemyPoint = getRadarPointForPosition(enemies[j].position);
                 drawMinimapMarker(ctx, enemyPoint, '#ff6a5c', 4, 8);
             }
 
             if (player && playerHealth > 0) {
-                var playerPoint = window.CrossfireRadar.worldToMinimapPoint({
-                    x: player.position.x,
-                    z: player.position.z
-                }, radarConfig);
+                var playerPoint = {
+                    x: size / 2,
+                    y: size / 2
+                };
                 drawMinimapMarker(ctx, playerPoint, '#8eff9a', 5, 10);
 
-                var heading = window.CrossfireRadar.getHeadingVector(player.yaw || 0, 16);
                 ctx.beginPath();
                 ctx.strokeStyle = '#dfffe6';
                 ctx.lineWidth = 2;
                 ctx.moveTo(playerPoint.x, playerPoint.y);
-                ctx.lineTo(playerPoint.x + heading.x, playerPoint.y + heading.y);
+                ctx.lineTo(playerPoint.x, playerPoint.y - 16);
                 ctx.stroke();
+
+                ctx.beginPath();
+                ctx.fillStyle = '#dfffe6';
+                ctx.moveTo(playerPoint.x, playerPoint.y - 20);
+                ctx.lineTo(playerPoint.x - 5, playerPoint.y - 10);
+                ctx.lineTo(playerPoint.x + 5, playerPoint.y - 10);
+                ctx.closePath();
+                ctx.fill();
             }
         }
 
@@ -851,6 +1320,7 @@
         function startGame() {
             console.log('=== startGame函数被调用 ===');
             try {
+                resumeAudioContext();
                 document.getElementById('menu').style.display = 'none';
                 document.getElementById('loading').style.display = 'block';
                 console.log('菜单已隐藏，显示加载提示');
@@ -974,7 +1444,12 @@
                 window.addEventListener('resize', onWindowResize);
 
                 isGameRunning = true;
+                setHudVisibility(true);
                 playerHealth = 100;
+                lastFootstepTime = 0;
+                footstepIndex = 0;
+                lastPlayerDamageSoundTime = 0;
+                lastHitConfirmTime = 0;
                 currentWeapon = Object.assign({}, weapons[selectedWeapon]);
                 createTeammates(teammateCount);
                 createEnemies(enemyCount);
@@ -3413,6 +3888,11 @@
                 keysPressed[e.code] = true;
 
                 if (isGameRunning) {
+                    if ((!e.repeat) && window.CrossfireHud && window.CrossfireHud.isHudToggleKey(e.code)) {
+                        toggleHudVisibility();
+                        return;
+                    }
+                    resumeAudioContext();
                     if (e.code === 'Space' && !player.isJumping) {
                         player.velocity.y = player.jumpForce;
                         player.isJumping = true;
@@ -3441,6 +3921,7 @@
 
             document.addEventListener('mousedown', function(e) {
                 if (!isGameRunning) return;
+                resumeAudioContext();
                 if (e.button === 0) {
                     if (!isPointerLocked) {
                         document.body.requestPointerLock();
@@ -3459,6 +3940,9 @@
 
             document.addEventListener('pointerlockchange', function() {
                 isPointerLocked = document.pointerLockElement === document.body;
+                if (isPointerLocked) {
+                    resumeAudioContext();
+                }
                 updatePointerStatusText();
             });
             console.log('游戏事件监听器设置成功');
@@ -3641,6 +4125,11 @@
             }
             
             playerHealth = 100;
+            setHudVisibility(true);
+            lastFootstepTime = 0;
+            footstepIndex = 0;
+            lastPlayerDamageSoundTime = 0;
+            lastHitConfirmTime = 0;
             isGameRunning = true;
             currentWeapon = Object.assign({}, weapons[selectedWeapon]);
             createWeaponModel(selectedWeapon);
@@ -3707,18 +4196,24 @@
             }
 
             updatePointerStatusText();
+            updateAudioStatusText();
         }
 
         function shoot() {
             if (!player.canShoot || player.isReloading) return;
             
             if (currentWeapon.ammo <= 0) {
+                playEmptyTriggerSound();
                 reload();
                 return;
             }
             
             player.canShoot = false;
             currentWeapon.ammo--;
+            playWeaponShotSound(selectedWeapon, {
+                volumeScale: 1,
+                pan: 0.08
+            });
 
             weaponRecoil = 0.15;
             
@@ -3811,6 +4306,9 @@
                             var actualDamage = bullet.damage * hitPart.multiplier;
                             enemies[j].health -= actualDamage;
                             hit = true;
+                            if (bullet.owner === 'player') {
+                                playHitConfirmSound(enemies[j].health <= 0);
+                            }
                             console.log('击中敌人' + hitPart.name + '! 伤害:' + actualDamage.toFixed(1) + ' 敌人血量:', enemies[j].health.toFixed(1));
                             if (enemies[j].health <= 0) {
                                 enemies[j].isAlive = false;
@@ -3831,6 +4329,7 @@
                             var actualDamage = bullet.damage * hitPart.multiplier;
                             playerHealth -= actualDamage;
                             hit = true;
+                            triggerPlayerDamageSound(actualDamage);
                             console.log('玩家被击中' + hitPart.name + '! 伤害:' + actualDamage.toFixed(1) + ' 玩家血量:', playerHealth.toFixed(1));
                         }
                     }
@@ -3872,6 +4371,7 @@
             if (keysPressed['KeyS']) direction.z += 1;
             if (keysPressed['KeyA']) direction.x -= 1;
             if (keysPressed['KeyD']) direction.x += 1;
+            var isMoving = direction.lengthSq() > 0;
 
             direction.normalize();
             direction.applyAxisAngle(new THREE.Vector3(0, 1, 0), player.yaw);
@@ -3897,6 +4397,19 @@
 
             camera.position.copy(player.position);
             camera.position.y += 1.6;
+
+            var now = Date.now();
+            if (window.CrossfireAudio && window.CrossfireAudio.shouldTriggerFootstep({
+                isMoving: isMoving,
+                isGrounded: player.position.y <= 0.001 && !player.isJumping,
+                isReloading: player.isReloading,
+                now: now,
+                lastStepTime: lastFootstepTime,
+                stepInterval: selectedWeapon === 'sniper' ? 380 : 320
+            })) {
+                lastFootstepTime = now;
+                playFootstepSound();
+            }
 
             if (player.shooting) shoot();
         }
@@ -4144,6 +4657,10 @@
                         bullet.position.copy(teammatePos);
                         bullets.push(bullet);
                         scene.add(bullet);
+                        playWeaponShotSound('rifle', {
+                            volumeScale: getDistanceVolume(teammate.position, 140, 0.05, 0.08),
+                            pan: getRelativePan(teammate.position)
+                        });
                     }
                 }
             }
@@ -4200,10 +4717,15 @@
                         bullet.position.copy(enemyPos);
                         bullets.push(bullet);
                         scene.add(bullet);
+                        playWeaponShotSound('rifle', {
+                            volumeScale: getDistanceVolume(enemy.position, 140, 0.05, 0.1),
+                            pan: getRelativePan(enemy.position)
+                        });
                     }
 
                     if (nearestDistance < 2) {
                         playerHealth -= 5 * delta;
+                        triggerPlayerDamageSound(8);
                     }
                 }
             }
@@ -4307,6 +4829,8 @@
             } else if (selectedWeapon === 'sniper') {
                 reloadDuration = 2800;
             }
+
+            playReloadSound(selectedWeapon);
             
             setTimeout(function() {
                 var needed = currentWeapon.maxAmmo - currentWeapon.ammo;

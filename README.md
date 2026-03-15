@@ -1,75 +1,55 @@
-# Crossfire - CS射击游戏
+# CrossFire Demo
 
-一款基于 Three.js 开发的 CS:GO 风格 3D 第一人称射击游戏，还原经典地图"炙热沙城2"(Dust 2)。
+一个基于 `Three.js` 的轻量级网页 FPS 原型，主入口是根目录下的 `index.html`。当前版本已经包含战术 HUD、小地图雷达、程序化音效，以及 `Q` 键一键隐藏 HUD 的能力。
 
-## 游戏特性
+## 功能概览
 
-### 武器系统
-- **手枪** - 精细建模，包含滑套、枪管、握把等细节
-- **AK47步枪** - 经典突击步枪，木质护木和枪托
-- **霰弹枪** - 泵动式霰弹枪，木质泵动护木
-- **AWM狙击枪** - 高精度狙击步枪，配备瞄准镜和两脚架
+- 第一人称移动、射击、换弹、敌人 AI 与击杀反馈
+- 右上角小地图：以玩家朝向为正上方，实时显示友军与敌军位置
+- 程序化战场音效：脚步、开枪、换弹、受击、命中提示
+- 战术 HUD：左上战况、左下武器状态、中央准星，按 `Q` 可隐藏/恢复
 
-### 武器动画
-- 精细的换弹动画（每种武器独特动画）
-- 射击后坐力效果
-- 枪口火焰特效
-- 行走时武器晃动
+## 目录说明
 
-### 游戏玩法
-- 第一人称视角射击
-- 身体部位伤害系统（爆头4倍伤害）
-- AI队友和敌人
-- 胜利/失败判定系统
+- `index.html`：当前正式入口，包含主要场景、UI 和游戏逻辑
+- `audio-utils.js` / `radar-utils.js` / `hud-utils.js`：音效、雷达投影、HUD 控制辅助模块
+- `*.test.mjs`：对应工具模块的 Node 测试
+- `test.html`：最小浏览器连通性检查页
+- `game.js`：早期独立实现，当前未接入主页面
 
-### 地图场景
-- 完整还原 CS2 炙热沙城2 (Dust 2) 地图布局
-- 包含：T Spawn、A Site、B Site、CT Spawn、Mid、Long A、Short A、Tunnel
-- 丰富的场景元素：棕榈树、油桶、沙袋、路灯
-- 新增：车辆、水塔、清真寺宣礼塔、市场、残破石柱
+## 本地运行
 
-## 操作说明
+项目没有构建步骤，直接启动静态文件服务即可：
 
-| 按键 | 功能 |
-|------|------|
-| W/A/S/D | 移动 |
-| 鼠标移动 | 瞄准 |
-| 鼠标左键 | 射击 |
-| 空格 | 跳跃 |
-| R | 换弹 |
-
-## 技术栈
-
-- **Three.js r128** - 3D渲染引擎
-- **HTML5 Canvas** - 渲染画布
-- **Pointer Lock API** - 鼠标锁定
-
-## 如何运行
-
-1. 克隆仓库
 ```bash
-git clone https://github.com/wang20130111/crossfire.git
-cd crossfire
+python3 -m http.server 8080
 ```
 
-2. 启动本地服务器
+打开 `http://127.0.0.1:8080/index.html`。
+
+操作说明：`WASD` 移动，鼠标瞄准，左键射击，`R` 换弹，空格跳跃，`Q` 隐藏/显示 HUD。浏览器会限制自动播放音频，所以需要先点击“开始游戏”或与页面交互一次来激活音效。
+
+## 测试
+
 ```bash
-python -m http.server 8080
+node --test audio-utils.test.mjs hud-utils.test.mjs radar-utils.test.mjs
 ```
 
-3. 在浏览器中打开
-```
-http://localhost:8080/index.html
-```
+这些测试覆盖脚步声触发、武器音效配置、HUD 切换和雷达坐标投影。UI 级改动建议再做一次浏览器手动冒烟检查。
 
-## 游戏截图
+## 部署到 Render
 
-游戏包含完整的菜单系统、HUD界面和游戏结束画面。
+这个仓库适合部署为 **Static Site**，不需要 `Web Service`。
 
-## 开发者
+- Service Type：`Static Site`
+- Branch：`main`
+- Root Directory：留空；当前仓库根目录就是站点根目录
+- Build Command：可填 `echo "Static site ready"` 作为空构建
+- Publish Directory：`.`
+- Auto-Deploy：建议开启，后续每次推送都会自动触发部署
 
-- **wang20130111**
+补充注意点：
 
-## 许可证
-
-MIT License
+- 页面依赖 `cdnjs.cloudflare.com` 提供的 `Three.js` CDN，最终访问环境需要能正常请求外部 CDN
+- 当前没有环境变量、后端服务或数据库依赖
+- 如果后续改成打包流程，再把 Render 的 `Build Command` 和 `Publish Directory` 改为实际产物目录

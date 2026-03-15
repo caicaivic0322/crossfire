@@ -35,6 +35,39 @@
         };
     }
 
+    function rotateRelativePosition(relative, yaw) {
+        var cos = Math.cos(yaw || 0);
+        var sin = Math.sin(yaw || 0);
+
+        return {
+            x: relative.x * cos - relative.z * sin,
+            z: relative.x * sin + relative.z * cos
+        };
+    }
+
+    function projectWorldToRadarPoint(position, focus, options) {
+        var size = options.size;
+        var padding = options.padding;
+        var range = options.range;
+        var center = size / 2;
+        var radius = center - padding;
+        var relative = {
+            x: position.x - focus.x,
+            z: position.z - focus.z
+        };
+        var rotated = rotateRelativePosition(relative, options.yaw || 0);
+        var normalizedX = rotated.x / range;
+        var normalizedZ = rotated.z / range;
+        var clampedX = clamp(normalizedX, -1, 1);
+        var clampedZ = clamp(normalizedZ, -1, 1);
+
+        return {
+            x: Math.round(center + clampedX * radius),
+            y: Math.round(center + clampedZ * radius),
+            clamped: clampedX !== normalizedX || clampedZ !== normalizedZ
+        };
+    }
+
     function getHeadingVector(yaw, length) {
         return {
             x: Math.sin(yaw) * length,
@@ -45,6 +78,8 @@
     return {
         clamp: clamp,
         worldToMinimapPoint: worldToMinimapPoint,
+        rotateRelativePosition: rotateRelativePosition,
+        projectWorldToRadarPoint: projectWorldToRadarPoint,
         getHeadingVector: getHeadingVector
     };
 });
